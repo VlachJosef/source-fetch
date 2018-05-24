@@ -18,10 +18,6 @@ import           Data.Semigroup                           ((<>))
 import qualified Data.Text                                as Text
 import qualified Data.Text.Lazy                           as TextL
 import           Data.Text.Lazy.Encoding                  as Enc
-import           Data.Time.Calendar                       (toGregorian)
-import           Data.Time.Clock                          (UTCTime (..), getCurrentTime)
-import           Data.Time.LocalTime                      (TimeOfDay (..), localDay, localTimeOfDay, utc,
-                                                           utcToLocalTime)
 import qualified Data.Vector                              as Vector
 import           GHC.IO.Exception                         (ExitCode)
 import qualified GitHub.Data                              as Github
@@ -38,20 +34,14 @@ import           Text.Parsec.Text                         (Parser)
 import           Text.ParserCombinators.Parsec.Char       (alphaNum, anyChar, digit, satisfy, string)
 import           Text.ParserCombinators.Parsec.Combinator (anyToken, between, eof, many1)
 
+data Env = Env
+  { currentDir :: FilePath
+  }
 
 ensureDirExists :: FilePath -> IO ()
 ensureDirExists dir = do
   dirExists <- doesDirectoryExist dir
   unless dirExists (createDirectory dir)
-
-cloneIfNotExists :: String -> String -> IO FilePath
-cloneIfNotExists organisationName repoName = do
-  cd <- getCurrentDirectory
-  let repoDir = cd </> repoName
-  dirExists <- doesDirectoryExist repoDir
-  if dirExists
-    then putStrLn ("Repo " <> repoName <> " already exists.") $> repoDir
-    else readProcessStdout (git organisationName repoName) $> repoDir
 
 parseMe :: Github.URL -> Either ParseError (String, String)
 parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
@@ -69,50 +59,59 @@ parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
     organisationParser :: Parser String
     organisationParser = string "git@github.com:" *> many1 (satisfy ((/=) '/'))
 
-cloneRepo :: (String, String) -> ReaderT Env IO FilePath
-cloneRepo repoInfo = lift $ (uncurry cloneIfNotExists) repoInfo
+cloneRepo :: String -> String -> ReaderT Env IO FilePath
+cloneRepo organisation repoName = do
+  Env{..} <- ask
+  let repoDir = currentDir </> repoName
+  dirExists <- lift $ doesDirectoryExist repoDir
+  lift $ if dirExists
+    then putStrLn ("Repo " <> repoName <> " already exists.") $> repoDir
+    else readProcessStdout (git organisation repoName) $> repoDir
 
-renameDotGit :: FilePath -> ReaderT Env IO ()
+
+renameDotGit :: FilePath -> ReaderT Env IO FilePath
 renameDotGit = lift . renameDotGit_
   where
-    renameDotGit_ :: FilePath -> IO ()
+    renameDotGit_ :: FilePath -> IO FilePath
     renameDotGit_ filePath = do
-      dirExists <- doesDirectoryExist filePath
-      if dirExists
-        then putStrLn ("Directory .git in" <> filePath <> " doesn't exist.")
-        else renameDirectory (filePath </> ".git") (filePath </> "_git")
+      let dotGit        = filePath </> ".git"
+          dotGitRenamed = filePath </> "_git"
+      dirExists <- doesDirectoryExist dotGit
+      filePath <$ if dirExists
+        then renameDirectory dotGit dotGitRenamed
+        else putStrLn ("Directory " <> dotGit <> " doesn't exist.")
 
 createGlobalDotIgnore :: ReaderT Env IO ()
 createGlobalDotIgnore = do
   Env{..} <- ask
   lift $ writeFile (currentDir </> ".gitignore") "_git"
 
-data Env = Env
-  { currentDir :: FilePath
-  }
-
-commitAll :: ReaderT Env IO ()
-commitAll = do
+gitInit :: ReaderT Env IO ()
+gitInit = do
   Env{..} <- ask
   dirExists <- lift $ doesDirectoryExist (currentDir </> ".git")
-  if dirExists
-    then lift $ putStrLn ("Directory .git in" <> currentDir <> " already exist.")
-    else do
-      readProcessStdout gitInit
-      readProcessStdout gitAdd
-      void . readProcessStdout $ gitCommit
+  lift $ if dirExists
+    then putStrLn ("Directory .git in" <> currentDir <> " already exist.")
+    else void . readProcessStdout $ gitInit_
   where
-    gitInit, gitAdd, gitCommit :: ProcessConfig () () ()
-    gitInit = proc "git" ["init"]
+    gitInit_ :: ProcessConfig () () ()
+    gitInit_ = proc "git" ["init"]
+
+commitRepo :: FilePath -> ReaderT Env IO ()
+commitRepo repoName = do
+  readProcessStdout gitAdd
+  void . readProcessStdout $ gitCommit
+  where
+    gitAdd, gitCommit :: ProcessConfig () () ()
     gitAdd = proc "git" ["add", "."]
-    gitCommit = proc "git" ["commit", "-m", "Initialize repository"]
+    gitCommit = proc "git" ["commit", "-m", "Initialize repository" <> repoName]
 
 
 wwww :: [(String, String)] -> ReaderT Env IO ()
 wwww xs = do
-  void . sequence $ (renameDotGit <=< cloneRepo) <$> xs
+  gitInit
   createGlobalDotIgnore
-  commitAll
+  void . sequence $ (commitRepo <=< renameDotGit <=< uncurry cloneRepo) <$> xs
 
 main = do
   auth <- getAuth
