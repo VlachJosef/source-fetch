@@ -4,7 +4,7 @@ module Main where
 
 import           Common
 import           Control.Monad                            (forM, forM_, unless, (<=<))
-import           Control.Monad.Reader                     (ReaderT, ask, runReaderT)
+import           Control.Monad.Reader                     (ReaderT, ask, runReaderT, withReaderT)
 import           Control.Monad.Trans.Class                (lift)
 import           Data.ByteString.Lazy                     as DBL hiding (putStrLn, writeFile)
 import qualified Data.ByteString.Lazy                     as L
@@ -38,6 +38,12 @@ data Env = Env
   { currentDir :: FilePath
   }
 
+data EnvWithRepo = EnvWithRepo
+  { env      :: Env
+  , repoName :: String
+  , organisationName :: String
+  }
+
 ensureDirExists :: FilePath -> IO ()
 ensureDirExists dir = do
   dirExists <- doesDirectoryExist dir
@@ -59,27 +65,25 @@ parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
     organisationParser :: Parser String
     organisationParser = string "git@github.com:" *> many1 (satisfy ((/=) '/'))
 
-cloneRepo :: String -> String -> ReaderT Env IO FilePath
-cloneRepo organisation repoName = do
-  Env{..} <- ask
-  let repoDir = currentDir </> repoName
+cloneRepo :: ReaderT EnvWithRepo IO ()
+cloneRepo = do
+  EnvWithRepo{..} <- ask
+  let repoDir = currentDir env </> repoName
   dirExists <- lift $ doesDirectoryExist repoDir
   lift $ if dirExists
-    then putStrLn ("Repo " <> repoName <> " already exists.") $> repoDir
-    else readProcessStdout (git organisation repoName) $> repoDir
+    then putStrLn $ "Repo " <> repoName <> " already exists."
+    else void $ readProcessStdout (git organisationName repoName)
 
-
-renameDotGit :: FilePath -> ReaderT Env IO FilePath
-renameDotGit = lift . renameDotGit_
-  where
-    renameDotGit_ :: FilePath -> IO FilePath
-    renameDotGit_ filePath = do
-      let dotGit        = filePath </> ".git"
-          dotGitRenamed = filePath </> "_git"
-      dirExists <- doesDirectoryExist dotGit
-      filePath <$ if dirExists
-        then renameDirectory dotGit dotGitRenamed
-        else putStrLn ("Directory " <> dotGit <> " doesn't exist.")
+renameDotGit :: ReaderT EnvWithRepo IO ()
+renameDotGit = do
+  EnvWithRepo{..} <- ask
+  let repoDir       = currentDir env </> repoName
+      dotGit        = repoDir </> ".git"
+      dotGitRenamed = repoDir </> "_git"
+  dirExists <- lift $ doesDirectoryExist dotGit
+  lift $ if dirExists
+    then renameDirectory dotGit dotGitRenamed
+    else putStrLn $ "Directory " <> dotGit <> " doesn't exist."
 
 createGlobalDotIgnore :: ReaderT Env IO ()
 createGlobalDotIgnore = do
@@ -89,29 +93,35 @@ createGlobalDotIgnore = do
 gitInit :: ReaderT Env IO ()
 gitInit = do
   Env{..} <- ask
-  dirExists <- lift $ doesDirectoryExist (currentDir </> ".git")
-  lift $ if dirExists
-    then putStrLn ("Directory .git in" <> currentDir <> " already exist.")
-    else void . readProcessStdout $ gitInit_
+  lift $ do
+    let dotGit = currentDir </> ".git"
+    dirExists <- doesDirectoryExist dotGit
+    if dirExists
+      then putStrLn $ "Directory " <> dotGit <> " already exist."
+      else void . readProcessStdout $ gitInit_
   where
     gitInit_ :: ProcessConfig () () ()
     gitInit_ = proc "git" ["init"]
 
-commitRepo :: FilePath -> ReaderT Env IO ()
-commitRepo repoName = do
-  readProcessStdout gitAdd
-  void . readProcessStdout $ gitCommit
-  where
-    gitAdd, gitCommit :: ProcessConfig () () ()
-    gitAdd = proc "git" ["add", "."]
-    gitCommit = proc "git" ["commit", "-m", "Initialize repository" <> repoName]
+commitRepo :: ReaderT EnvWithRepo IO ()
+commitRepo = do
+  EnvWithRepo{..} <- ask
+  let gitAdd, gitCommit :: ProcessConfig () () ()
+      gitAdd = proc "git" ["add", "."]
+      gitCommit = proc "git" ["commit", "-m", ("Initialize repository - " <> repoName)]
+  lift $ readProcessStdout gitAdd
+  lift . void . readProcessStdout $ gitCommit
 
+processRepo :: String -> String -> ReaderT Env IO ()
+processRepo organisation repo = withReaderT (\a -> EnvWithRepo a repo organisation) $ cloneRepo *>
+                                                      renameDotGit *>
+                                                      commitRepo
 
 wwww :: [(String, String)] -> ReaderT Env IO ()
 wwww xs = do
   gitInit
   createGlobalDotIgnore
-  void . sequence $ (commitRepo <=< renameDotGit <=< uncurry cloneRepo) <$> xs
+  void . sequence $ uncurry processRepo <$> xs
 
 main = do
   auth <- getAuth
