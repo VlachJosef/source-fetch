@@ -3,11 +3,10 @@
 module Main where
 
 import           Common
-import           Control.Monad                            (forM, forM_)
-import           Control.Monad                            (unless)
-import           Data.ByteString.Lazy                     as DBL hiding
-                                                                  (putStrLn,
-                                                                  writeFile)
+import           Control.Monad                            (forM, forM_, unless, (<=<))
+import           Control.Monad.Reader                     (ReaderT, ask, runReaderT)
+import           Control.Monad.Trans.Class                (lift)
+import           Data.ByteString.Lazy                     as DBL hiding (putStrLn, writeFile)
 import qualified Data.ByteString.Lazy                     as L
 import           Data.Functor                             (void, ($>), (<$))
 import           Data.List                                (intercalate)
@@ -20,35 +19,24 @@ import qualified Data.Text                                as Text
 import qualified Data.Text.Lazy                           as TextL
 import           Data.Text.Lazy.Encoding                  as Enc
 import           Data.Time.Calendar                       (toGregorian)
-import           Data.Time.Clock                          (UTCTime (..),
-                                                           getCurrentTime)
-import           Data.Time.LocalTime                      (TimeOfDay (..),
-                                                           localDay,
-                                                           localTimeOfDay, utc,
+import           Data.Time.Clock                          (UTCTime (..), getCurrentTime)
+import           Data.Time.LocalTime                      (TimeOfDay (..), localDay, localTimeOfDay, utc,
                                                            utcToLocalTime)
 import qualified Data.Vector                              as Vector
 import           GHC.IO.Exception                         (ExitCode)
 import qualified GitHub.Data                              as Github
 import qualified GitHub.Endpoints.Repos                   as Github
 import qualified GitHub.Endpoints.Search                  as Github
-import           System.Directory                         (createDirectory,
-                                                           doesDirectoryExist,
-                                                           getCurrentDirectory,
-                                                           renameDirectory,
-                                                           setCurrentDirectory)
+import           System.Directory                         (createDirectory, doesDirectoryExist, getCurrentDirectory,
+                                                           renameDirectory, setCurrentDirectory)
 import           System.Environment                       (getArgs)
 import           System.FilePath                          ((</>))
 import           System.IO                                (writeFile)
 import           System.Process.Typed
-import           Text.Parsec                              (ParseError, parse,
-                                                           parserFail, space,
-                                                           spaces, try)
+import           Text.Parsec                              (ParseError, parse, parserFail, space, spaces, try)
 import           Text.Parsec.Text                         (Parser)
-import           Text.ParserCombinators.Parsec.Char       (alphaNum, anyChar,
-                                                           digit, satisfy,
-                                                           string)
-import           Text.ParserCombinators.Parsec.Combinator (anyToken, between,
-                                                           eof, many1)
+import           Text.ParserCombinators.Parsec.Char       (alphaNum, anyChar, digit, satisfy, string)
+import           Text.ParserCombinators.Parsec.Combinator (anyToken, between, eof, many1)
 
 
 ensureDirExists :: FilePath -> IO ()
@@ -81,11 +69,11 @@ parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
     organisationParser :: Parser String
     organisationParser = string "git@github.com:" *> many1 (satisfy ((/=) '/'))
 
-cloneRepos :: [(String, String)] -> IO [FilePath]
-cloneRepos repoInfo = sequence $ uncurry cloneIfNotExists <$> repoInfo
+cloneRepo :: (String, String) -> ReaderT Env IO FilePath
+cloneRepo repoInfo = lift $ (uncurry cloneIfNotExists) repoInfo
 
-renameDotGit :: [FilePath] -> IO ()
-renameDotGit xs = void . sequence $ renameDotGit_ <$> xs
+renameDotGit :: FilePath -> ReaderT Env IO ()
+renameDotGit = lift . renameDotGit_
   where
     renameDotGit_ :: FilePath -> IO ()
     renameDotGit_ filePath = do
@@ -94,17 +82,21 @@ renameDotGit xs = void . sequence $ renameDotGit_ <$> xs
         then putStrLn ("Directory .git in" <> filePath <> " doesn't exist.")
         else renameDirectory (filePath </> ".git") (filePath </> "_git")
 
-createGlobalDotIgnore :: IO ()
+createGlobalDotIgnore :: ReaderT Env IO ()
 createGlobalDotIgnore = do
-  cd <- getCurrentDirectory
-  writeFile (cd </> ".gitignore") "_git"
+  Env{..} <- ask
+  lift $ writeFile (currentDir </> ".gitignore") "_git"
 
-commitAll :: IO ()
+data Env = Env
+  { currentDir :: FilePath
+  }
+
+commitAll :: ReaderT Env IO ()
 commitAll = do
-  cd <- getCurrentDirectory
-  dirExists <- doesDirectoryExist (cd </> ".git")
+  Env{..} <- ask
+  dirExists <- lift $ doesDirectoryExist (currentDir </> ".git")
   if dirExists
-    then putStrLn ("Directory .git in" <> cd <> " already exist.")
+    then lift $ putStrLn ("Directory .git in" <> currentDir <> " already exist.")
     else do
       readProcessStdout gitInit
       readProcessStdout gitAdd
@@ -114,6 +106,13 @@ commitAll = do
     gitInit = proc "git" ["init"]
     gitAdd = proc "git" ["add", "."]
     gitCommit = proc "git" ["commit", "-m", "Initialize repository"]
+
+
+wwww :: [(String, String)] -> ReaderT Env IO ()
+wwww xs = do
+  void . sequence $ (renameDotGit <=< cloneRepo) <$> xs
+  createGlobalDotIgnore
+  commitAll
 
 main = do
   auth <- getAuth
@@ -135,12 +134,10 @@ main = do
     sss = sequence $ parseMe <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos2))
 
   case sss of
-    Left errors -> putStrLn $ "Parse errors" <> show errors
-    Right repoInfo   -> do
-      repoDirs <- cloneRepos repoInfo
-      renameDotGit repoDirs
-      createGlobalDotIgnore
-      commitAll
+    Left errors     -> putStrLn $ "Parse errors" <> show errors
+    Right repoNames -> do
+      cd <- getCurrentDirectory
+      runReaderT (wwww repoNames) (Env cd)
 
   case result of
     Left e  -> putStrLn $ "Error: " ++ show e
