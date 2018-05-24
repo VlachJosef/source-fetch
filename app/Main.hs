@@ -3,7 +3,7 @@
 module Main where
 
 import           Common
-import           Control.Monad                            (forM, forM_, unless, (<=<))
+import           Control.Monad                            (forM, forM_, unless)
 import           Control.Monad.Reader                     (ReaderT, ask, runReaderT, withReaderT)
 import           Control.Monad.Trans.Class                (lift)
 import           Data.ByteString.Lazy                     as DBL hiding (putStrLn, writeFile)
@@ -34,14 +34,22 @@ import           Text.Parsec.Text                         (Parser)
 import           Text.ParserCombinators.Parsec.Char       (alphaNum, anyChar, digit, satisfy, string)
 import           Text.ParserCombinators.Parsec.Combinator (anyToken, between, eof, many1)
 
+newtype RepoName = RepoName
+  { unRepoName :: String
+  }
+
+newtype OrganisationName = OrganisationName
+  { unOrganisationName :: String
+  }
+
 data Env = Env
   { currentDir :: FilePath
   }
 
 data EnvWithRepo = EnvWithRepo
   { env      :: Env
-  , repoName :: String
-  , organisationName :: String
+  , repoName :: RepoName
+  , organisationName :: OrganisationName
   }
 
 ensureDirExists :: FilePath -> IO ()
@@ -49,46 +57,21 @@ ensureDirExists dir = do
   dirExists <- doesDirectoryExist dir
   unless dirExists (createDirectory dir)
 
-parseMe :: Github.URL -> Either ParseError (String, String)
+parseMe :: Github.URL -> Either ParseError (OrganisationName, RepoName)
 parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
   where
 
-    pp :: Parser (String, String)
+    pp :: Parser (OrganisationName, RepoName)
     pp = do
        org <- organisationParser
        name <- repoParser
        pure (org, name)
 
-    repoParser :: Parser String
-    repoParser = string "/" *> many1 (satisfy ((/=) '.')) <* string ".git"
+    repoParser :: Parser RepoName
+    repoParser = string "/" *> (RepoName <$> many1 (satisfy ((/=) '.'))) <* string ".git"
 
-    organisationParser :: Parser String
-    organisationParser = string "git@github.com:" *> many1 (satisfy ((/=) '/'))
-
-cloneRepo :: ReaderT EnvWithRepo IO ()
-cloneRepo = do
-  EnvWithRepo{..} <- ask
-  let repoDir = currentDir env </> repoName
-  dirExists <- lift $ doesDirectoryExist repoDir
-  lift $ if dirExists
-    then putStrLn $ "Repo " <> repoName <> " already exists."
-    else void $ readProcessStdout (git organisationName repoName)
-
-renameDotGit :: ReaderT EnvWithRepo IO ()
-renameDotGit = do
-  EnvWithRepo{..} <- ask
-  let repoDir       = currentDir env </> repoName
-      dotGit        = repoDir </> ".git"
-      dotGitRenamed = repoDir </> "_git"
-  dirExists <- lift $ doesDirectoryExist dotGit
-  lift $ if dirExists
-    then renameDirectory dotGit dotGitRenamed
-    else putStrLn $ "Directory " <> dotGit <> " doesn't exist."
-
-createGlobalDotIgnore :: ReaderT Env IO ()
-createGlobalDotIgnore = do
-  Env{..} <- ask
-  lift $ writeFile (currentDir </> ".gitignore") "_git"
+    organisationParser :: Parser OrganisationName
+    organisationParser = string "git@github.com:" *> (OrganisationName <$> many1 (satisfy ((/=) '/')))
 
 gitInit :: ReaderT Env IO ()
 gitInit = do
@@ -103,50 +86,75 @@ gitInit = do
     gitInit_ :: ProcessConfig () () ()
     gitInit_ = proc "git" ["init"]
 
+createGlobalDotIgnore :: ReaderT Env IO ()
+createGlobalDotIgnore = do
+  Env{..} <- ask
+  lift $ writeFile (currentDir </> ".gitignore") "_git"
+
+cloneRepo :: ReaderT EnvWithRepo IO ()
+cloneRepo = do
+  EnvWithRepo{..} <- ask
+  let repoDir = currentDir env </> unRepoName repoName
+  dirExists <- lift $ doesDirectoryExist repoDir
+  lift $ if dirExists
+    then putStrLn $ "Repo " <> unRepoName repoName <> " already exists."
+    else void $ readProcessStdout (git organisationName repoName)
+
+renameDotGit :: ReaderT EnvWithRepo IO ()
+renameDotGit = do
+  EnvWithRepo{..} <- ask
+  let repoDir       = currentDir env </> unRepoName repoName
+      dotGit        = repoDir </> ".git"
+      dotGitRenamed = repoDir </> "_git"
+  dirExists <- lift $ doesDirectoryExist dotGit
+  lift $ if dirExists
+    then renameDirectory dotGit dotGitRenamed
+    else putStrLn $ "Directory " <> dotGit <> " doesn't exist."
+
 commitRepo :: ReaderT EnvWithRepo IO ()
 commitRepo = do
   EnvWithRepo{..} <- ask
   let gitAdd, gitCommit :: ProcessConfig () () ()
       gitAdd = proc "git" ["add", "."]
-      gitCommit = proc "git" ["commit", "-m", ("Initialize repository - " <> repoName)]
+      gitCommit = proc "git" ["commit", "-m", ("Initialize repository - " <> unRepoName repoName)]
   lift $ readProcessStdout gitAdd
   lift . void . readProcessStdout $ gitCommit
 
-processRepo :: String -> String -> ReaderT Env IO ()
-processRepo organisation repo = withReaderT (\a -> EnvWithRepo a repo organisation) $ cloneRepo *>
-                                                      renameDotGit *>
-                                                      commitRepo
-
-wwww :: [(String, String)] -> ReaderT Env IO ()
+wwww :: [(OrganisationName, RepoName)] -> ReaderT Env IO ()
 wwww xs = do
   gitInit
   createGlobalDotIgnore
   void . sequence $ uncurry processRepo <$> xs
 
+processRepo :: OrganisationName -> RepoName -> ReaderT Env IO ()
+processRepo organisation repo = withReaderT (\a -> EnvWithRepo a repo organisation) $ cloneRepo *>
+                                                      renameDotGit *>
+                                                      commitRepo
+
+goToClonesDir :: IO FilePath
+goToClonesDir = do
+  cd <- getCurrentDirectory
+  let clonesDir = cd </> "clones"
+  ensureDirExists clonesDir
+  setCurrentDirectory clonesDir
+  putStrLn $ "Running in " <> clonesDir <> " directory."
+  pure clonesDir
+
+main :: IO ()
 main = do
   auth <- getAuth
   --result <- Github.organizationRepos' auth (Github.mkOrganizationName "org-name") Github.RepoPublicityPublic
   result <- pure $ (Right repos2 :: Either Github.Error (Vector.Vector Github.Repo))
 
-  cd <- getCurrentDirectory
-
-  let cloneDirs = cd </> "clones"
-
-  ensureDirExists cloneDirs
-
-  setCurrentDirectory cloneDirs
-
-  putStrLn cloneDirs
+  cloneDirs <- goToClonesDir
 
   let
-    sss :: Either ParseError [(String, String)]
+    sss :: Either ParseError [(OrganisationName, RepoName)]
     sss = sequence $ parseMe <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos2))
 
   case sss of
     Left errors     -> putStrLn $ "Parse errors" <> show errors
-    Right repoNames -> do
-      cd <- getCurrentDirectory
-      runReaderT (wwww repoNames) (Env cd)
+    Right repoNames -> runReaderT (wwww repoNames) (Env cloneDirs)
 
   case result of
     Left e  -> putStrLn $ "Error: " ++ show e
@@ -183,8 +191,8 @@ genesis = Map.fromList
   , ("basvandijk", "monad-control")
   ]
 
-git :: String -> String -> ProcessConfig () () ()
-git organisationName repoName = proc "git" ["clone", "git@github.com:" <> organisationName <> "/" <> repoName <> ".git"]
+git :: OrganisationName -> RepoName -> ProcessConfig () () ()
+git organisationName repoName = proc "git" ["clone", "git@github.com:" <> unOrganisationName organisationName <> "/" <> unRepoName repoName <> ".git"]
 
 makeRepoSshUrl, makeRepoHtmlUrl, makeRepoUrl, makeRepoHooksUrl :: Text.Text -> Text.Text -> Github.URL
 makeRepoSshUrl   organisation repoName = Github.URL $ "git@github.com:" <> organisation <> "/" <> repoName <> ".git"
