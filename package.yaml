@@ -1,0 +1,55 @@
+name:                SourceFetch
+version:             0.1.0.0
+github:              "VlachJosef/source-fetch"
+license:             BSD3
+author:              "Josef Vlach"
+maintainer:          "vlach.josef@gmail.com"
+copyright:           "2018 Josef Vlach"
+
+extra-source-files:
+# - README.md
+
+# Metadata used when publishing your package
+# synopsis:            Short description of your package
+# category:            Web
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on Github at <https://github.com/VlachJosef/source-fetch#readme>
+default-extensions:
+- OverloadedStrings
+dependencies:
+- base >= 4.7 && < 5
+- bytestring
+- containers
+- directory
+- filepath
+- github
+- mmorph
+- mtl
+- newtype-generics
+- parsec
+- text
+- time
+- transformers
+- transformers-base
+- typed-process
+- vector
+library:
+  source-dirs: src
+
+executables:
+  source-fetch:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -Wall
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+      SourceFetch
+
+
+tests:
