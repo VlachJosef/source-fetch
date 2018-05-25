@@ -24,6 +24,7 @@ dependencies:
 - bytestring
 - containers
 - directory
+- extra
 - filepath
 - github
 - mmorph

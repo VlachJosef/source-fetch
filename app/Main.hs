@@ -3,9 +3,11 @@
 module Main where
 
 import           Common
-import           Control.Monad                            (forM, forM_, unless)
+import           Control.Monad                            (forM, forM_)
+import           Control.Monad.Extra                      (unlessM)
 import           Control.Monad.Reader                     (ReaderT, ask, runReaderT, withReaderT)
 import           Control.Monad.Trans.Class                (lift)
+import           Control.Monad.Trans.Class                (MonadTrans)
 import           Data.ByteString.Lazy                     as DBL hiding (putStrLn, writeFile)
 import qualified Data.ByteString.Lazy                     as L
 import           Data.Functor                             (void, ($>), (<$))
@@ -52,10 +54,15 @@ data EnvWithRepo = EnvWithRepo
   , organisationName :: OrganisationName
   }
 
-ensureDirExists :: FilePath -> IO ()
-ensureDirExists dir = do
-  dirExists <- doesDirectoryExist dir
-  unless dirExists (createDirectory dir)
+predicateM :: (MonadTrans t, Monad m, Monad (t m)) => (a -> m Bool) -> a -> m b -> m c -> t m ()
+predicateM pred value onTrue onFalse = do
+  success <- lift $ (pred value)
+  lift $ if success
+    then void onTrue
+    else void onFalse
+
+ifDirExists :: FilePath -> IO a -> IO b -> ReaderT c IO ()
+ifDirExists = predicateM doesDirectoryExist
 
 parseMe :: Github.URL -> Either ParseError (OrganisationName, RepoName)
 parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
@@ -76,15 +83,10 @@ parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
 gitInit :: ReaderT Env IO ()
 gitInit = do
   Env{..} <- ask
-  lift $ do
-    let dotGit = currentDir </> ".git"
-    dirExists <- doesDirectoryExist dotGit
-    if dirExists
-      then putStrLn $ "Directory " <> dotGit <> " already exist."
-      else void . readProcessStdout $ gitInit_
-  where
-    gitInit_ :: ProcessConfig () () ()
-    gitInit_ = proc "git" ["init"]
+  let dotGit = currentDir </> ".git"
+  ifDirExists dotGit
+    (putStrLn $ "Directory " <> dotGit <> " already exist.")
+    (readProcessStdout (proc "git" ["init"]))
 
 createGlobalDotIgnore :: ReaderT Env IO ()
 createGlobalDotIgnore = do
@@ -95,10 +97,9 @@ cloneRepo :: ReaderT EnvWithRepo IO ()
 cloneRepo = do
   EnvWithRepo{..} <- ask
   let repoDir = currentDir env </> unRepoName repoName
-  dirExists <- lift $ doesDirectoryExist repoDir
-  lift $ if dirExists
-    then putStrLn $ "Repo " <> unRepoName repoName <> " already exists."
-    else void $ readProcessStdout (git organisationName repoName)
+  ifDirExists repoDir
+    (putStrLn $ "Repo " <> unRepoName repoName <> " already exists.")
+    (readProcessStdout (gitClone organisationName repoName))
 
 renameDotGit :: ReaderT EnvWithRepo IO ()
 renameDotGit = do
@@ -106,10 +107,9 @@ renameDotGit = do
   let repoDir       = currentDir env </> unRepoName repoName
       dotGit        = repoDir </> ".git"
       dotGitRenamed = repoDir </> "_git"
-  dirExists <- lift $ doesDirectoryExist dotGit
-  lift $ if dirExists
-    then renameDirectory dotGit dotGitRenamed
-    else putStrLn $ "Directory " <> dotGit <> " doesn't exist."
+  ifDirExists dotGit
+    (renameDirectory dotGit dotGitRenamed)
+    (putStrLn $ "Directory " <> dotGit <> " doesn't exist.")
 
 commitRepo :: ReaderT EnvWithRepo IO ()
 commitRepo = do
@@ -133,10 +133,14 @@ processRepo organisation repo = withReaderT (\a -> EnvWithRepo a repo organisati
 
 goToClonesDir :: IO FilePath
 goToClonesDir = do
-  cd <- getCurrentDirectory
-  let clonesDir = cd </> "clones"
-  ensureDirExists clonesDir
+  clonesDir <- (</> "clones") <$> getCurrentDirectory
+
+  unlessM
+    (doesDirectoryExist clonesDir)
+    (createDirectory clonesDir)
+
   setCurrentDirectory clonesDir
+
   putStrLn $ "Running in " <> clonesDir <> " directory."
   pure clonesDir
 
@@ -191,8 +195,8 @@ genesis = Map.fromList
   , ("basvandijk", "monad-control")
   ]
 
-git :: OrganisationName -> RepoName -> ProcessConfig () () ()
-git organisationName repoName = proc "git" ["clone", "git@github.com:" <> unOrganisationName organisationName <> "/" <> unRepoName repoName <> ".git"]
+gitClone :: OrganisationName -> RepoName -> ProcessConfig () () ()
+gitClone organisationName repoName = proc "git" ["clone", "git@github.com:" <> unOrganisationName organisationName <> "/" <> unRepoName repoName <> ".git"]
 
 makeRepoSshUrl, makeRepoHtmlUrl, makeRepoUrl, makeRepoHooksUrl :: Text.Text -> Text.Text -> Github.URL
 makeRepoSshUrl   organisation repoName = Github.URL $ "git@github.com:" <> organisation <> "/" <> repoName <> ".git"
