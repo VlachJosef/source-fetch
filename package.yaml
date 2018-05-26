@@ -27,6 +27,7 @@ dependencies:
 - extra
 - filepath
 - github
+- haskeline
 - mmorph
 - mtl
 - newtype-generics
