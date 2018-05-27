@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 
-module SourceFetch.FakeRepos (
-  genesis
+module SourceFetch.FakeRepos
+  ( genesis
   , mkRepo
   ) where
 

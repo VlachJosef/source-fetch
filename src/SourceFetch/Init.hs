@@ -1,12 +1,10 @@
 {-# LANGUAGE RecordWildCards #-}
 
-module SourceFetch.Init (
-  execInit
-  , doStatus
+module SourceFetch.Init
+  ( execInit
   ) where
 
-import           Common                        (getAuth)
-import           Control.Monad.Extra           (unlessM)
+import           Common                        (getAuth, goToClonesDir)
 import           Control.Monad.Reader          (ReaderT, ask, runReaderT, withReaderT)
 import           Control.Monad.Trans.Class     (MonadTrans, lift)
 import           Control.Monad.Trans.Except    (ExceptT (..), runExceptT, withExceptT)
@@ -21,8 +19,7 @@ import qualified GitHub.Endpoints.Repos        as Github (mkOrganizationName, or
 import           SourceFetch.FakeRepos         (genesis, mkRepo)
 import           SourceFetch.Init.Data         (OrganisationName (..), RepoName (..))
 import           SourceFetch.Init.SshUrlParser (parseSshUrl)
-import           System.Directory              (createDirectory, doesDirectoryExist, getCurrentDirectory,
-                                                renameDirectory, withCurrentDirectory)
+import           System.Directory              (doesDirectoryExist, renameDirectory, withCurrentDirectory)
 import           System.FilePath               ((</>))
 import           System.IO                     (writeFile)
 import           System.Process.Typed          (ProcessConfig, proc, readProcessStdout)
@@ -89,7 +86,7 @@ commitRepo :: ReaderT EnvWithRepo IO ()
 commitRepo = do
   EnvWithRepo{..} <- ask
   let gitAdd, gitCommit :: ProcessConfig () () ()
-      gitAdd = proc "git" ["add", "."]
+      gitAdd    = proc "git" ["add", "."]
       gitCommit = proc "git" ["commit", "-m", "Initialize repository - " <> unRepoName repoName]
   lift . void . readProcessStdout $ gitAdd
   lift . void . readProcessStdout $ gitCommit
@@ -104,19 +101,6 @@ processRepo :: OrganisationName -> RepoName -> ReaderT Env IO ()
 processRepo organisation repo = withReaderT (fromEnv organisation repo) $ cloneRepo *>
                                                                           renameDotGit *>
                                                                           commitRepo
-
-goToClonesDir :: IO FilePath
-goToClonesDir = do
-  clonesDir <- (</> "clones") <$> getCurrentDirectory
-
-  clonesDir <$ unlessM
-    (doesDirectoryExist clonesDir)
-    (createDirectory clonesDir)
-
-doStatus :: IO ()
-doStatus = do
-  cd <- getCurrentDirectory
-  putStrLn $ "Current directory: " <> cd
 
 data InitError
   = GError Github.Error

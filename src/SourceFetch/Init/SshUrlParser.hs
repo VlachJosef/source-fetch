@@ -1,5 +1,5 @@
-module SourceFetch.Init.SshUrlParser (
-  parseSshUrl
+module SourceFetch.Init.SshUrlParser
+  ( parseSshUrl
   ) where
 
 import qualified GitHub.Data                              as Github (URL, getUrl)

@@ -1,8 +1,8 @@
 {-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE RecordWildCards #-}
 
-module SourceFetch.Completion (
-  executeCmd
+module SourceFetch.Completion
+  ( executeCmd
   ) where
 
 import           Control.Applicative                      ((<|>))
@@ -10,7 +10,8 @@ import           Control.Monad.Trans.Class                (lift)
 import           Control.Monad.Trans.Identity             (IdentityT)
 import           Data.List                                (isPrefixOf)
 import qualified Data.Text                                as Text
-import           SourceFetch.Init                         (doStatus, execInit)
+import           SourceFetch.Init                         (execInit)
+import           SourceFetch.Status                       (doStatus)
 import           System.Console.Haskeline                 (Completion (..), InputT, Settings, defaultSettings,
                                                            getInputLine, runInputT, setComplete)
 import           System.Console.Haskeline.Completion      (CompletionFunc)

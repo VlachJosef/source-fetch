@@ -1,5 +1,5 @@
-module SourceFetch.Init.Data (
-  RepoName(..)
+module SourceFetch.Init.Data
+  ( RepoName(..)
   , OrganisationName(..)
   ) where
 
