@@ -4,9 +4,9 @@ module SourceFetch.Init
   ( execInit
   ) where
 
-import           Common                        (getAuth, goToClonesDir)
+import           Common                        (getAuth, goToClonesDir, ifDirExistsT_)
 import           Control.Monad.Reader          (ReaderT, ask, runReaderT, withReaderT)
-import           Control.Monad.Trans.Class     (MonadTrans, lift)
+import           Control.Monad.Trans.Class     (lift)
 import           Control.Monad.Trans.Except    (ExceptT (..), runExceptT, withExceptT)
 import           Data.Functor                  (void)
 import qualified Data.Map.Strict               as Map (toList)
@@ -19,7 +19,7 @@ import qualified GitHub.Endpoints.Repos        as Github (mkOrganizationName, or
 import           SourceFetch.FakeRepos         (genesis, mkRepo)
 import           SourceFetch.Init.Data         (OrganisationName (..), RepoName (..))
 import           SourceFetch.Init.SshUrlParser (parseSshUrl)
-import           System.Directory              (doesDirectoryExist, renameDirectory, withCurrentDirectory)
+import           System.Directory              (renameDirectory, withCurrentDirectory)
 import           System.FilePath               ((</>))
 import           System.IO                     (writeFile)
 import           System.Process.Typed          (ProcessConfig, proc, readProcessStdout)
@@ -38,21 +38,11 @@ data EnvWithRepo = EnvWithRepo
 fromEnv :: OrganisationName -> RepoName -> Env -> EnvWithRepo
 fromEnv ornName repoName env = EnvWithRepo env repoName ornName
 
-predicateM :: (MonadTrans t, Monad m, Monad (t m)) => (a -> m Bool) -> a -> m b -> m c -> t m ()
-predicateM predicate value onTrue onFalse = do
-  success <- lift $ predicate value
-  lift $ if success
-    then void onTrue
-    else void onFalse
-
-ifDirExists :: FilePath -> IO a -> IO b -> ReaderT c IO ()
-ifDirExists = predicateM doesDirectoryExist
-
 gitInit :: ReaderT Env IO ()
 gitInit = do
   Env{..} <- ask
   let dotGit = currentDir </> ".git"
-  ifDirExists dotGit
+  ifDirExistsT_ dotGit
     (putStrLn $ "Directory " <> dotGit <> " already exists.")
     (readProcessStdout (proc "git" ["init"]))
 
@@ -65,7 +55,7 @@ cloneRepo :: ReaderT EnvWithRepo IO ()
 cloneRepo = do
   EnvWithRepo{..} <- ask
   let repoDir = currentDir env </> unRepoName repoName
-  ifDirExists repoDir
+  ifDirExistsT_ repoDir
     (putStrLn $ "Repo " <> unRepoName repoName <> " already exists.")
     (readProcessStdout (gitClone organisationName repoName))
 
@@ -78,7 +68,7 @@ renameDotGit = do
   let repoDir       = currentDir env </> unRepoName repoName
       dotGit        = repoDir </> ".git"
       dotGitRenamed = repoDir </> "_git"
-  ifDirExists dotGit
+  ifDirExistsT_ dotGit
     (renameDirectory dotGit dotGitRenamed)
     (putStrLn $ "Directory " <> dotGit <> " doesn't exist.")
 
