@@ -10,7 +10,7 @@ import           Control.Monad.Trans.Class                (lift)
 import           Control.Monad.Trans.Identity             (IdentityT)
 import           Data.List                                (isPrefixOf)
 import qualified Data.Text                                as Text
-import           SourceFetch.Init                         (doInit)
+import           SourceFetch.Init                         (doStatus, execInit)
 import           System.Console.Haskeline                 (Completion (..), InputT, Settings, defaultSettings,
                                                            getInputLine, runInputT, setComplete)
 import           System.Console.Haskeline.Completion      (CompletionFunc)
@@ -22,6 +22,7 @@ import           Text.ParserCombinators.Parsec.Combinator (anyToken, eof, many1)
 data ClientCmd
   = Fetch !Text.Text
   | Init  !Text.Text
+  | Status
   deriving (Eq, Show)
 
 data Cmd
@@ -68,7 +69,8 @@ execCommand = \case
 execClientCmd :: ClientCmd -> IO ()
 execClientCmd = \case
   Fetch disconnet -> putStrLn "TODO Fetch"
-  Init init -> doInit
+  Init init -> execInit
+  Status -> doStatus
 
 parseCommand :: Text.Text -> Cmd
 parseCommand s = case parse pCmd "launch-command" (Text.strip s) of
@@ -89,10 +91,12 @@ pClientCmd :: Parser ClientCmd
 pClientCmd
    =  pClientFetch
   <|> pClientInit
+  <|> pStatus
 
-pClientFetch, pClientInit :: Parser ClientCmd
+pClientFetch, pClientInit, pStatus :: Parser ClientCmd
 pClientFetch = Fetch . Text.pack <$> string "fetch"
-pClientInit = Init . Text.pack <$> string "init"
+pClientInit  = Init  . Text.pack <$> string "init"
+pStatus      = Status            <$  string "status"
 
 pExit, pEmpty, pUnknown :: Parser Cmd
 pExit    = ExitCmd  <$ string "exit"
@@ -127,7 +131,7 @@ firstOrderCommands = terminalCommands ++ nonTerminalCommands
   where
     terminalCommands, nonTerminalCommands :: [CommandInfo]
     terminalCommands    = (`CommandInfo` False) <$> ["exit"]
-    nonTerminalCommands = (`CommandInfo` True)  <$> ["init", "fetch"]
+    nonTerminalCommands = (`CommandInfo` True)  <$> ["init", "fetch", "status"]
 
 pAlphaNumOrNothing :: Parser String
 pAlphaNumOrNothing = (many1 alphaNum <|> pure "") <* eof

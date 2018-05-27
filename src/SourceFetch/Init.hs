@@ -2,24 +2,26 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module SourceFetch.Init (
-  doInit
+  execInit
+  , doStatus
   ) where
 
 import           Common                                   (getAuth)
-import           Control.Monad                            (forM_)
 import           Control.Monad.Extra                      (unlessM)
 import           Control.Monad.Reader                     (ReaderT, ask, runReaderT, withReaderT)
 import           Control.Monad.Trans.Class                (MonadTrans, lift)
+import           Control.Monad.Trans.Except               (ExceptT (..), runExceptT, withExceptT)
 import           Data.Functor                             (void)
 import qualified Data.Map.Strict                          as Map (Map, fromList, toList)
 import           Data.Maybe                               (catMaybes)
 import           Data.Semigroup                           ((<>))
 import qualified Data.Text                                as Text
 import qualified Data.Vector                              as Vector
+import qualified GitHub                                   (Auth)
 import qualified GitHub.Data                              as Github
 import qualified GitHub.Endpoints.Repos                   as Github (mkOrganizationName, organizationRepos')
 import           System.Directory                         (createDirectory, doesDirectoryExist, getCurrentDirectory,
-                                                           renameDirectory, setCurrentDirectory)
+                                                           renameDirectory, withCurrentDirectory)
 import           System.FilePath                          ((</>))
 import           System.IO                                (writeFile)
 import           System.Process.Typed                     (ProcessConfig, proc, readProcessStdout)
@@ -115,8 +117,8 @@ commitRepo = do
   lift . void . readProcessStdout $ gitAdd
   lift . void . readProcessStdout $ gitCommit
 
-wwww :: [(OrganisationName, RepoName)] -> ReaderT Env IO ()
-wwww xs = do
+runInit :: [(OrganisationName, RepoName)] -> ReaderT Env IO ()
+runInit xs = do
   gitInit
   createGlobalDotIgnore
   void . sequence $ uncurry processRepo <$> xs
@@ -130,45 +132,53 @@ goToClonesDir :: IO FilePath
 goToClonesDir = do
   clonesDir <- (</> "clones") <$> getCurrentDirectory
 
-  unlessM
+  clonesDir <$ unlessM
     (doesDirectoryExist clonesDir)
     (createDirectory clonesDir)
 
-  setCurrentDirectory clonesDir
+doStatus :: IO ()
+doStatus = do
+  cd <- getCurrentDirectory
+  putStrLn $ "Current directory: " <> cd
 
-  putStrLn $ "Running in " <> clonesDir <> " directory."
-  pure clonesDir
+data InitError
+  = GError Github.Error
+  | PError ParseError
 
+toExceptT :: Monad m => (a -> b) -> Either a c -> ExceptT b m c
+toExceptT f e = toExceptTM f (pure e)
 
-doInit :: IO ()
-doInit = do
-  auth <- getAuth
-  result <- Github.organizationRepos' auth (Github.mkOrganizationName "org-name") Github.RepoPublicityPublic
-  --result <- pure $ (Right repos2 :: Either Github.Error (Vector.Vector Github.Repo))
+toExceptTM :: Monad m => (a -> b) -> m (Either a c) -> ExceptT b m c
+toExceptTM f e = withExceptT f $ ExceptT e
 
-  cloneDirs <- goToClonesDir
+hardcodedRepos :: ExceptT InitError IO (Vector.Vector Github.Repo)
+hardcodedRepos = toExceptT GError (Right repos)
+  where
+    repos :: Vector.Vector Github.Repo
+    repos = Vector.fromList $ uncurry mkRepo <$> Map.toList genesis
 
-  let
-    sss :: Either ParseError [(OrganisationName, RepoName)]
-    sss = sequence $ parseMe <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos2))
+githubRepos :: Maybe (GitHub.Auth) -> ExceptT InitError IO (Vector.Vector Github.Repo)
+githubRepos auth = toExceptTM GError (Github.organizationRepos' auth (Github.mkOrganizationName "org-name") Github.RepoPublicityPublic)
 
-  case sss of
-    Left errors     -> putStrLn $ "Parse errors" <> show errors
-    Right repoNames -> runReaderT (wwww repoNames) (Env cloneDirs)
-
+execInit :: IO ()
+execInit = do
+  result <- runExceptT doInit
   case result of
-    Left e  -> putStrLn $ "Error: " ++ show e
-    Right repos -> do
+    (Left (GError githubError)) -> putStrLn $ "GithubError " <> show githubError
+    (Left (PError parseError))  -> putStrLn $ "ParseError " <> show parseError
+    (Right a)                   -> pure a
 
-      forM_ repos (\a -> putStrLn $
-                         "repoSshUrl   : " ++ show (Github.repoSshUrl a) ++ "\n" ++
-                         "repoHtmlUrl  : " ++ show (Github.repoHtmlUrl a) ++ "\n" ++
-                         "repoName     : " ++ show (Github.repoName a) ++ "\n" ++
-                         "repoId       : " ++ show (Github.repoId a) ++ "\n" ++
-                         "repoUrl      : " ++ show (Github.repoUrl a) ++ "\n" ++
-                         "repoHooksUrl : " ++ show (Github.repoHooksUrl a) ++ "\n" ++
-                         "repoOwner    : " ++ show (Github.repoOwner a) ++ "\n"
-                       )
+doInit :: ExceptT InitError IO ()
+doInit = do
+  auth      <- lift $ getAuth
+  repos     <- hardcodedRepos
+  --repos   <- githubRepos auth
+  clonesDir <- lift $ goToClonesDir
+  repoNames <- toExceptT PError $ repoInfo repos
+  lift $ withCurrentDirectory clonesDir (runReaderT (runInit repoNames) (Env clonesDir))
+  where
+     repoInfo :: Vector.Vector Github.Repo -> Either ParseError [(OrganisationName, RepoName)]
+     repoInfo repos = sequence $ parseMe <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos))
 
 genesis :: Map.Map Text.Text Text.Text
 genesis = Map.fromList
@@ -191,9 +201,6 @@ makeRepoSshUrl   organisation repoName = Github.URL $ "git@github.com:" <> organ
 makeRepoHtmlUrl  organisation repoName = Github.URL $ "https://github.com/" <> organisation <> "/" <> repoName
 makeRepoUrl      organisation repoName = Github.URL $ "https://api.github.com/repos/" <> organisation <> "/" <> repoName
 makeRepoHooksUrl organisation repoName = Github.URL (Github.getUrl (makeRepoUrl organisation repoName) <> "/hooks")
-
-repos2 :: Vector.Vector Github.Repo
-repos2 = Vector.fromList $ uncurry mkRepo <$> Map.toList genesis
 
 mkRepo :: Text.Text -> Text.Text -> Github.Repo
 mkRepo org rName =
