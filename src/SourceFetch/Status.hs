@@ -5,9 +5,9 @@ module SourceFetch.Status
   ( doStatus
   ) where
 
-import           Common                    (goToClonesDir, ifDirExists)
+import           Common                    (goToClonesDir)
 import           Data.Semigroup            ((<>))
-import           System.Directory          (getCurrentDirectory, listDirectory)
+import           System.Directory          (doesDirectoryExist, getCurrentDirectory, listDirectory)
 import           System.FilePath           ((</>))
 
 import           Data.Data                 (Data)
@@ -41,11 +41,13 @@ doStatus = do
   T.ppTable modes
 
 repoInfo :: FilePath -> IO Info
-repoInfo repo =
-  (Info repo) <$> ifDirExists (repoDir </> "_git")
-    (pure Locked)
-    (ifDirExists (repoDir </> ".git")
-      (pure Open)
-      (pure Unknown))
+repoInfo repo = info <$> exists "_git" <*> exists ".git"
   where
-    repoDir = "clones" </> repo
+    exists :: String -> IO Bool
+    exists dir = doesDirectoryExist ("clones" </> repo </> dir)
+
+    info :: Bool -> Bool -> Info
+    info underscoreGit dotGit = Info repo $ case (underscoreGit, dotGit) of
+     (True, _) -> Locked
+     (_, True) -> Open
+     _         -> Unknown
