@@ -1,4 +1,3 @@
-{-# LANGUAGE LambdaCase      #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module SourceFetch.Init (
@@ -6,38 +5,28 @@ module SourceFetch.Init (
   , doStatus
   ) where
 
-import           Common                                   (getAuth)
-import           Control.Monad.Extra                      (unlessM)
-import           Control.Monad.Reader                     (ReaderT, ask, runReaderT, withReaderT)
-import           Control.Monad.Trans.Class                (MonadTrans, lift)
-import           Control.Monad.Trans.Except               (ExceptT (..), runExceptT, withExceptT)
-import           Data.Functor                             (void)
-import qualified Data.Map.Strict                          as Map (Map, fromList, toList)
-import           Data.Maybe                               (catMaybes)
-import           Data.Semigroup                           ((<>))
-import qualified Data.Text                                as Text
-import qualified Data.Vector                              as Vector
-import qualified GitHub                                   (Auth)
-import qualified GitHub.Data                              as Github
-import qualified GitHub.Endpoints.Repos                   as Github (mkOrganizationName, organizationRepos')
-import           SourceFetch.FakeRepos                    (genesis, mkRepo)
-import           System.Directory                         (createDirectory, doesDirectoryExist, getCurrentDirectory,
-                                                           renameDirectory, withCurrentDirectory)
-import           System.FilePath                          ((</>))
-import           System.IO                                (writeFile)
-import           System.Process.Typed                     (ProcessConfig, proc, readProcessStdout)
-import           Text.Parsec                              (ParseError, parse)
-import           Text.Parsec.Text                         (Parser)
-import           Text.ParserCombinators.Parsec.Char       (satisfy, string)
-import           Text.ParserCombinators.Parsec.Combinator (many1)
-
-newtype RepoName = RepoName
-  { unRepoName :: String
-  }
-
-newtype OrganisationName = OrganisationName
-  { unOrganisationName :: String
-  }
+import           Common                        (getAuth)
+import           Control.Monad.Extra           (unlessM)
+import           Control.Monad.Reader          (ReaderT, ask, runReaderT, withReaderT)
+import           Control.Monad.Trans.Class     (MonadTrans, lift)
+import           Control.Monad.Trans.Except    (ExceptT (..), runExceptT, withExceptT)
+import           Data.Functor                  (void)
+import qualified Data.Map.Strict               as Map (toList)
+import           Data.Maybe                    (catMaybes)
+import           Data.Semigroup                ((<>))
+import qualified Data.Vector                   as Vector (Vector, fromList, toList)
+import qualified GitHub                        (Auth)
+import qualified GitHub.Data                   as Github (Error, Repo, RepoPublicity (..), repoSshUrl)
+import qualified GitHub.Endpoints.Repos        as Github (mkOrganizationName, organizationRepos')
+import           SourceFetch.FakeRepos         (genesis, mkRepo)
+import           SourceFetch.Init.Data         (OrganisationName (..), RepoName (..))
+import           SourceFetch.Init.SshUrlParser (parseSshUrl)
+import           System.Directory              (createDirectory, doesDirectoryExist, getCurrentDirectory,
+                                                renameDirectory, withCurrentDirectory)
+import           System.FilePath               ((</>))
+import           System.IO                     (writeFile)
+import           System.Process.Typed          (ProcessConfig, proc, readProcessStdout)
+import           Text.Parsec                   (ParseError)
 
 data Env = Env
   { currentDir :: FilePath
@@ -49,9 +38,12 @@ data EnvWithRepo = EnvWithRepo
   , organisationName :: OrganisationName
   }
 
+fromEnv :: OrganisationName -> RepoName -> Env -> EnvWithRepo
+fromEnv ornName repoName env = EnvWithRepo env repoName ornName
+
 predicateM :: (MonadTrans t, Monad m, Monad (t m)) => (a -> m Bool) -> a -> m b -> m c -> t m ()
 predicateM predicate value onTrue onFalse = do
-  success <- lift $ (predicate value)
+  success <- lift $ predicate value
   lift $ if success
     then void onTrue
     else void onFalse
@@ -59,28 +51,12 @@ predicateM predicate value onTrue onFalse = do
 ifDirExists :: FilePath -> IO a -> IO b -> ReaderT c IO ()
 ifDirExists = predicateM doesDirectoryExist
 
-parseMe :: Github.URL -> Either ParseError (OrganisationName, RepoName)
-parseMe parsee = parse pp "repo-parser" (Github.getUrl parsee)
-  where
-
-    pp :: Parser (OrganisationName, RepoName)
-    pp = do
-       org <- organisationParser
-       name <- repoParser
-       pure (org, name)
-
-    repoParser :: Parser RepoName
-    repoParser = string "/" *> (RepoName <$> many1 (satisfy ((/=) '.'))) <* string ".git"
-
-    organisationParser :: Parser OrganisationName
-    organisationParser = string "git@github.com:" *> (OrganisationName <$> many1 (satisfy ((/=) '/')))
-
 gitInit :: ReaderT Env IO ()
 gitInit = do
   Env{..} <- ask
   let dotGit = currentDir </> ".git"
   ifDirExists dotGit
-    (putStrLn $ "Directory " <> dotGit <> " already exist.")
+    (putStrLn $ "Directory " <> dotGit <> " already exists.")
     (readProcessStdout (proc "git" ["init"]))
 
 createGlobalDotIgnore :: ReaderT Env IO ()
@@ -114,7 +90,7 @@ commitRepo = do
   EnvWithRepo{..} <- ask
   let gitAdd, gitCommit :: ProcessConfig () () ()
       gitAdd = proc "git" ["add", "."]
-      gitCommit = proc "git" ["commit", "-m", ("Initialize repository - " <> unRepoName repoName)]
+      gitCommit = proc "git" ["commit", "-m", "Initialize repository - " <> unRepoName repoName]
   lift . void . readProcessStdout $ gitAdd
   lift . void . readProcessStdout $ gitCommit
 
@@ -125,9 +101,9 @@ runInit xs = do
   void . sequence $ uncurry processRepo <$> xs
 
 processRepo :: OrganisationName -> RepoName -> ReaderT Env IO ()
-processRepo organisation repo = withReaderT (\a -> EnvWithRepo a repo organisation) $ cloneRepo *>
-                                                      renameDotGit *>
-                                                      commitRepo
+processRepo organisation repo = withReaderT (fromEnv organisation repo) $ cloneRepo *>
+                                                                          renameDotGit *>
+                                                                          commitRepo
 
 goToClonesDir :: IO FilePath
 goToClonesDir = do
@@ -158,7 +134,7 @@ hardcodedRepos = toExceptT GError (Right repos)
     repos :: Vector.Vector Github.Repo
     repos = Vector.fromList $ uncurry mkRepo <$> Map.toList genesis
 
-githubRepos :: Maybe (GitHub.Auth) -> ExceptT InitError IO (Vector.Vector Github.Repo)
+githubRepos :: Maybe GitHub.Auth -> ExceptT InitError IO (Vector.Vector Github.Repo)
 githubRepos auth = toExceptTM GError (Github.organizationRepos' auth (Github.mkOrganizationName "org-name") Github.RepoPublicityPublic)
 
 execInit :: IO ()
@@ -171,12 +147,12 @@ execInit = do
 
 doInit :: ExceptT InitError IO ()
 doInit = do
-  auth      <- lift $ getAuth
+  auth      <- lift getAuth
   repos     <- hardcodedRepos
   --repos   <- githubRepos auth
-  clonesDir <- lift $ goToClonesDir
+  clonesDir <- lift goToClonesDir
   repoNames <- toExceptT PError $ repoInfo repos
   lift $ withCurrentDirectory clonesDir (runReaderT (runInit repoNames) (Env clonesDir))
   where
      repoInfo :: Vector.Vector Github.Repo -> Either ParseError [(OrganisationName, RepoName)]
-     repoInfo repos = sequence $ parseMe <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos))
+     repoInfo repos = sequence $ parseSshUrl <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos))

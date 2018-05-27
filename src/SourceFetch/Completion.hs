@@ -21,7 +21,7 @@ import           Text.ParserCombinators.Parsec.Combinator (anyToken, eof, many1)
 
 data ClientCmd
   = Fetch !Text.Text
-  | Init  !Text.Text
+  | Init
   | Status
   deriving (Eq, Show)
 
@@ -68,8 +68,8 @@ execCommand = \case
 
 execClientCmd :: ClientCmd -> IO ()
 execClientCmd = \case
-  Fetch disconnet -> putStrLn "TODO Fetch"
-  Init init -> execInit
+  Fetch disconnect -> putStrLn "TODO Fetch"
+  Init -> execInit
   Status -> doStatus
 
 parseCommand :: Text.Text -> Cmd
@@ -95,7 +95,7 @@ pClientCmd
 
 pClientFetch, pClientInit, pStatus :: Parser ClientCmd
 pClientFetch = Fetch . Text.pack <$> string "fetch"
-pClientInit  = Init  . Text.pack <$> string "init"
+pClientInit  = Init              <$  string "init"
 pStatus      = Status            <$  string "status"
 
 pExit, pEmpty, pUnknown :: Parser Cmd
