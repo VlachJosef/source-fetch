@@ -2,7 +2,9 @@
 {-# LANGUAGE DeriveGeneric      #-}
 
 module SourceFetch.Status
-  ( doStatus
+  ( Info(..)
+  , RepoMode(..)
+  , doStatus
   ) where
 
 import           Common                    (goToClonesDir)
@@ -36,7 +38,7 @@ doStatus = do
   putStrLn $ "Current directory: " <> cd
 
   putStrLn "Managed repos: "
-  modes <- sequence $ repoInfo <$> repos
+  modes <- traverse repoInfo repos
 
   T.ppTable modes
 

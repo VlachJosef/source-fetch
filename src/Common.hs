@@ -5,17 +5,20 @@ module Common
   , ifDirExistsT
   , ifDirExists_
   , ifDirExistsT_
+  , toExceptT
+  , toExceptTM
   ) where
 
-import           Control.Monad.Extra       (unlessM)
-import           Control.Monad.Reader      (ReaderT)
-import           Control.Monad.Trans.Class (MonadTrans, lift)
-import           Data.Functor              (void)
-import qualified GitHub                    (Auth (..))
-import           GitHub.Internal.Prelude   (fromString)
-import           System.Directory          (createDirectory, doesDirectoryExist, getCurrentDirectory)
-import           System.Environment        (lookupEnv)
-import           System.FilePath           ((</>))
+import           Control.Monad.Extra        (unlessM)
+import           Control.Monad.Reader       (ReaderT)
+import           Control.Monad.Trans.Class  (MonadTrans, lift)
+import           Control.Monad.Trans.Except (ExceptT (..), withExceptT)
+import           Data.Functor               (void)
+import qualified GitHub                     (Auth (..))
+import           GitHub.Internal.Prelude    (fromString)
+import           System.Directory           (createDirectory, doesDirectoryExist, getCurrentDirectory)
+import           System.Environment         (lookupEnv)
+import           System.FilePath            ((</>))
 
 getAuth :: IO (Maybe GitHub.Auth)
 getAuth = do
@@ -61,3 +64,9 @@ goToClonesDir = do
   clonesDir <$ unlessM
     (doesDirectoryExist clonesDir)
     (createDirectory clonesDir)
+
+toExceptT :: Monad m => (a -> b) -> Either a c -> ExceptT b m c
+toExceptT f e = toExceptTM f (pure e)
+
+toExceptTM :: Monad m => (a -> b) -> m (Either a c) -> ExceptT b m c
+toExceptTM f e = withExceptT f $ ExceptT e

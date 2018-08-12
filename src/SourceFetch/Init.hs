@@ -1,47 +1,40 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE GADTs            #-}
+{-# LANGUAGE RecordWildCards  #-}
+{-# LANGUAGE TypeApplications #-}
 
 module SourceFetch.Init
   ( execInit
+  , lockDotGit
+  , unlockDotGit
   ) where
 
-import           Common                        (getAuth, goToClonesDir, ifDirExistsT_)
-import           Control.Monad.Reader          (ReaderT, ask, runReaderT, withReaderT)
-import           Control.Monad.Trans.Class     (lift)
-import           Control.Monad.Trans.Except    (ExceptT (..), runExceptT, withExceptT)
-import           Data.Functor                  (void)
-import qualified Data.Map.Strict               as Map (toList)
-import           Data.Maybe                    (catMaybes)
-import           Data.Semigroup                ((<>))
-import qualified Data.Vector                   as Vector (Vector, fromList, toList)
-import qualified GitHub                        (Auth)
-import qualified GitHub.Data                   as Github (Error, Repo, RepoPublicity (..), repoSshUrl)
-import qualified GitHub.Endpoints.Repos        as Github (mkOrganizationName, organizationRepos')
-import           SourceFetch.FakeRepos         (genesis, mkRepo)
-import           SourceFetch.Init.Data         (OrganisationName (..), RepoName (..))
-import           SourceFetch.Init.SshUrlParser (parseSshUrl)
-import           System.Directory              (renameDirectory, withCurrentDirectory)
-import           System.FilePath               ((</>))
-import           System.IO                     (writeFile)
-import           System.Process.Typed          (ProcessConfig, proc, readProcessStdout)
-import           Text.Parsec                   (ParseError)
-
-data Env = Env
-  { currentDir :: FilePath
-  }
-
-data EnvWithRepo = EnvWithRepo
-  { env              :: Env
-  , repoName         :: RepoName
-  , organisationName :: OrganisationName
-  }
-
-fromEnv :: OrganisationName -> RepoName -> Env -> EnvWithRepo
-fromEnv ornName repoName env = EnvWithRepo env repoName ornName
+import           Common                     (ifDirExistsT_, toExceptT, toExceptTM)
+import           Control.Monad.Reader       (ReaderT, ask, withReaderT)
+import           Control.Monad.Trans.Class  (lift)
+import           Control.Monad.Trans.Except (ExceptT (..), runExceptT)
+import           Control.Newtype.Generics   (op)
+import           Data.Functor               (void)
+import qualified Data.Map.Strict            as Map (toList)
+import           Data.Semigroup             ((<>))
+import           Data.Text                  (unpack)
+import qualified Data.Vector                as V (Vector, fromList)
+import qualified GitHub                     (Auth)
+import qualified GitHub.Data                as Github (Repo, RepoPublicity (..))
+import qualified GitHub.Endpoints.Repos     as Github (mkOrganizationName, organizationRepos')
+import           SourceFetch.FakeRepos      (genesis, mkRepo)
+import           SourceFetch.Init.Data      (InitError (..), OrganisationName (..), RepoName (..), RepoSource (..))
+import           SourceFetch.Types          (Env (..), EnvWithProcess (..), EnvWithRepo (..), HasCurrentDir (..),
+                                             HasRepoSource (..), RootLevel)
+import           SourceFetch.Util           (execProcess, runAction)
+import           System.Directory           (doesDirectoryExist, renameDirectory)
+import           System.FilePath            ((</>))
+import           System.IO                  (writeFile)
+import           System.Process.Typed       (ProcessConfig, proc, readProcessStdout)
 
 gitInit :: ReaderT Env IO ()
 gitInit = do
   Env{..} <- ask
-  let dotGit = currentDir </> ".git"
+  let dotGit = eCurrentDir </> ".git"
   ifDirExistsT_ dotGit
     (putStrLn $ "Directory " <> dotGit <> " already exists.")
     (readProcessStdout (proc "git" ["init"]))
@@ -49,84 +42,91 @@ gitInit = do
 createGlobalDotIgnore :: ReaderT Env IO ()
 createGlobalDotIgnore = do
   Env{..} <- ask
-  lift $ writeFile (currentDir </> ".gitignore") "_git"
+  lift $ writeFile (eCurrentDir </> ".gitignore") "_git"
 
-cloneRepo :: ReaderT EnvWithRepo IO ()
-cloneRepo = do
+doesRepoExists :: ReaderT EnvWithRepo IO Bool
+doesRepoExists = do
   EnvWithRepo{..} <- ask
-  let repoDir = currentDir env </> unRepoName repoName
-  ifDirExistsT_ repoDir
-    (putStrLn $ "Repo " <> unRepoName repoName <> " already exists.")
-    (readProcessStdout (gitClone organisationName repoName))
+  let repoDir = currentDir ewrEnv </> unpack (unRepoName (rsName ewrRepoSource))
+  lift $ doesDirectoryExist repoDir
 
-gitClone :: OrganisationName -> RepoName -> ProcessConfig () () ()
-gitClone organisationName repoName = proc "git" ["clone", "git@github.com:" <> unOrganisationName organisationName <> "/" <> unRepoName repoName <> ".git"]
-
-renameDotGit :: ReaderT EnvWithRepo IO ()
-renameDotGit = do
-  EnvWithRepo{..} <- ask
-  let repoDir       = currentDir env </> unRepoName repoName
-      dotGit        = repoDir </> ".git"
-      dotGitRenamed = repoDir </> "_git"
+renameDotGit ::
+  ( HasRepoSource a
+  , HasCurrentDir a
+  )
+  => FilePath
+  -> FilePath
+  -> ReaderT a IO ()
+renameDotGit from to = do
+  a <- ask
+  let cd            = currentDir a
+      rep           = unpack (op RepoName (rsName (repoSource a)))
+      repoDir       = cd </> rep
+      dotGit        = repoDir </> from
+      dotGitRenamed = repoDir </> to
   ifDirExistsT_ dotGit
     (renameDirectory dotGit dotGitRenamed)
     (putStrLn $ "Directory " <> dotGit <> " doesn't exist.")
 
-commitRepo :: ReaderT EnvWithRepo IO ()
-commitRepo = do
-  EnvWithRepo{..} <- ask
-  let gitAdd, gitCommit :: ProcessConfig () () ()
-      gitAdd    = proc "git" ["add", "."]
-      gitCommit = proc "git" ["commit", "-m", "Initialize repository - " <> unRepoName repoName]
-  lift . void . readProcessStdout $ gitAdd
-  lift . void . readProcessStdout $ gitCommit
+lockDotGit ::
+  ( HasRepoSource a
+  , HasCurrentDir a
+  ) => ReaderT a IO ()
+lockDotGit = renameDotGit ".git" "_git"
 
-runInit :: [(OrganisationName, RepoName)] -> ReaderT Env IO ()
+unlockDotGit ::
+  ( HasRepoSource a
+  , HasCurrentDir a
+  ) => ReaderT a IO ()
+unlockDotGit = renameDotGit "_git" ".git"
+
+runInit :: [RepoSource] -> ReaderT Env IO ()
 runInit xs = do
   gitInit
   createGlobalDotIgnore
-  void . sequence $ uncurry processRepo <$> xs
+  void $ traverse processRepo xs
 
-processRepo :: OrganisationName -> RepoName -> ReaderT Env IO ()
-processRepo organisation repo = withReaderT (fromEnv organisation repo) $ cloneRepo *>
-                                                                          renameDotGit *>
-                                                                          commitRepo
+processRepo :: RepoSource -> ReaderT Env IO ()
+processRepo rs = withReaderT (flip EnvWithRepo rs) $ do
+  exists <- doesRepoExists
+  if exists
+    then do
+      EnvWithRepo{..} <- ask
+      let repoDir = currentDir ewrEnv </> unpack (unRepoName (rsName ewrRepoSource))
+      lift $ putStrLn $ "Repo " <> repoDir <> " already exists."
+    else
+      atRootLevel gitClone *>
+      lockDotGit *>
+      atRootLevel (const gitAdd) *>
+      atRootLevel gitCommit
 
-data InitError
-  = GError Github.Error
-  | PError ParseError
+atRootLevel :: (EnvWithRepo -> ProcessConfig () () ()) -> ReaderT EnvWithRepo IO ()
+atRootLevel f = withReaderT (flip (EnvWithProcess @RootLevel) f) execProcess
 
-toExceptT :: Monad m => (a -> b) -> Either a c -> ExceptT b m c
-toExceptT f e = toExceptTM f (pure e)
+gitAdd :: ProcessConfig () () ()
+gitAdd = proc "git" ["add", "."]
 
-toExceptTM :: Monad m => (a -> b) -> m (Either a c) -> ExceptT b m c
-toExceptTM f e = withExceptT f $ ExceptT e
+gitCommit, gitClone :: EnvWithRepo -> ProcessConfig () () ()
+gitCommit EnvWithRepo{..} = proc "git" ["commit", "-m", "Initialize repository - " <> unpack (op RepoName $ rsName ewrRepoSource)]
 
-hardcodedRepos :: ExceptT InitError IO (Vector.Vector Github.Repo)
+gitClone EnvWithRepo{..} = proc "git" ["clone", "git@github.com:" <> unpack (op OrganisationName $ rsOrganisation ewrRepoSource) <> "/" <> unpack (op RepoName $ rsName ewrRepoSource) <> ".git"]
+
+hardcodedRepos :: ExceptT InitError IO (V.Vector Github.Repo)
 hardcodedRepos = toExceptT GError (Right repos)
   where
-    repos :: Vector.Vector Github.Repo
-    repos = Vector.fromList $ uncurry mkRepo <$> Map.toList genesis
+    repos :: V.Vector Github.Repo
+    repos = V.fromList $ uncurry mkRepo <$> Map.toList genesis
 
-githubRepos :: Maybe GitHub.Auth -> ExceptT InitError IO (Vector.Vector Github.Repo)
+githubRepos :: Maybe GitHub.Auth -> ExceptT InitError IO (V.Vector Github.Repo)
 githubRepos auth = toExceptTM GError (Github.organizationRepos' auth (Github.mkOrganizationName "org-name") Github.RepoPublicityPublic)
 
 execInit :: IO ()
 execInit = do
   result <- runExceptT doInit
   case result of
-    (Left (GError githubError)) -> putStrLn $ "GithubError " <> show githubError
-    (Left (PError parseError))  -> putStrLn $ "ParseError " <> show parseError
-    (Right a)                   -> pure a
+    Left (GError githubError) -> putStrLn $ "GithubError " <> show githubError
+    Left (PError parseError)  -> putStrLn $ "ParseError " <> show parseError
+    Right a                   -> pure a
 
 doInit :: ExceptT InitError IO ()
-doInit = do
-  auth      <- lift getAuth
-  repos     <- hardcodedRepos
-  --repos   <- githubRepos auth
-  clonesDir <- lift goToClonesDir
-  repoNames <- toExceptT PError $ repoInfo repos
-  lift $ withCurrentDirectory clonesDir (runReaderT (runInit repoNames) (Env clonesDir))
-  where
-     repoInfo :: Vector.Vector Github.Repo -> Either ParseError [(OrganisationName, RepoName)]
-     repoInfo repos = sequence $ parseSshUrl <$> (catMaybes . Vector.toList $ (Github.repoSshUrl <$> repos))
+doInit = runAction runInit

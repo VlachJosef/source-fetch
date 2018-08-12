@@ -10,6 +10,7 @@ import           Control.Monad.Trans.Class                (lift)
 import           Control.Monad.Trans.Identity             (IdentityT)
 import           Data.List                                (isPrefixOf)
 import qualified Data.Text                                as Text
+import           SourceFetch.Fetch                        (execFetch, execPull)
 import           SourceFetch.Init                         (execInit)
 import           SourceFetch.Status                       (doStatus)
 import           System.Console.Haskeline                 (Completion (..), InputT, Settings, defaultSettings,
@@ -24,6 +25,7 @@ data ClientCmd
   = Fetch !Text.Text
   | Init
   | Status
+  | Pull
   deriving (Eq, Show)
 
 data Cmd
@@ -57,19 +59,20 @@ executeCmd = runInputT (settings comp) loop
            minput <- getInputLine ">>> "
            case minput of
                Nothing    -> lift $ pure ()
-               Just input -> lift . lift $ execCommand (parseCommand (Text.pack input))
+               Just input -> lift . lift . execCommand . parseCommand . Text.pack $ input
 
 execCommand :: Cmd -> IO ()
 execCommand = \case
   Cmd clientCmd -> execClientCmd clientCmd
-  InvalidCmd a parseError -> putStrLn "Parse error"
+  InvalidCmd _ _ -> putStrLn "Parse error"
   ExitCmd -> putStrLn "Exit"
   EmptyCmd -> putStrLn "Empty"
-  UnknownCmd unknown -> putStrLn "UnknownCmd"
+  UnknownCmd _ -> putStrLn "UnknownCmd"
 
 execClientCmd :: ClientCmd -> IO ()
 execClientCmd = \case
-  Fetch disconnect -> putStrLn "TODO Fetch"
+  Fetch _ -> execFetch
+  Pull -> execPull
   Init -> execInit
   Status -> doStatus
 
@@ -91,11 +94,13 @@ pClient = Cmd <$> pClientCmd
 pClientCmd :: Parser ClientCmd
 pClientCmd
    =  pClientFetch
+  <|> pClientPull
   <|> pClientInit
   <|> pStatus
 
-pClientFetch, pClientInit, pStatus :: Parser ClientCmd
+pClientFetch, pClientPull, pClientInit, pStatus :: Parser ClientCmd
 pClientFetch = Fetch . Text.pack <$> string "fetch"
+pClientPull  = Pull              <$  string "pull"
 pClientInit  = Init              <$  string "init"
 pStatus      = Status            <$  string "status"
 
